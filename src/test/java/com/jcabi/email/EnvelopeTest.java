@@ -15,12 +15,15 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Arrays;
 import java.util.Properties;
 import javax.mail.Message;
 import javax.mail.Multipart;
+import javax.mail.Part;
 import javax.mail.Session;
 import javax.mail.internet.InternetAddress;
 import javax.mail.internet.MimeMessage;
+import javax.mail.internet.MimeMultipart;
 import org.hamcrest.MatcherAssert;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
@@ -32,6 +35,56 @@ import org.mockito.Mockito;
  * @since 1.4
  */
 final class EnvelopeTest {
+
+    /**
+     * MIME subtype of a mixed container.
+     */
+    private static final String MIXED = "multipart/mixed";
+
+    /**
+     * MIME subtype of an alternative container.
+     */
+    private static final String ALT = "multipart/alternative";
+
+    /**
+     * Content type of a binary GIF attachment.
+     */
+    private static final String GIF = "image/gif";
+
+    /**
+     * File name of a GIF attachment.
+     */
+    private static final String PIC = "picture.gif";
+
+    /**
+     * File name of a text attachment.
+     */
+    private static final String NOTES = "notes.txt";
+
+    /**
+     * Content of the plain body part.
+     */
+    private static final String PLAIN = "plain alternative body line";
+
+    /**
+     * Content of the HTML body part.
+     */
+    private static final String HTML = "html alternative body line";
+
+    /**
+     * Payload stored inside the text attachment.
+     */
+    private static final String TEXT = "attached notes payload line";
+
+    /**
+     * Prefix of a temporary file.
+     */
+    private static final String PREFIX = "jcabi-email";
+
+    /**
+     * Suffix of a temporary GIF file.
+     */
+    private static final String SUFFIX_GIF = ".gif";
 
     /**
      * Envelope.Constant can cache.
@@ -133,23 +186,146 @@ final class EnvelopeTest {
      */
     @Test
     void putsAttachmentsIntoMixedContainer() throws Exception {
-        final File file = File.createTempFile("jcabi-email", ".gif");
+        final File file = File.createTempFile(
+            EnvelopeTest.PREFIX, EnvelopeTest.SUFFIX_GIF
+        );
         try {
             Files.write(file.toPath(), new byte[] {1, 2, 3});
             final ByteArrayOutputStream stream = new ByteArrayOutputStream();
             new Envelope.Mime()
                 .with(new EnPlain("Here is the picture attached"))
-                .with(new EnBinary(file, "my-picture.gif", "image/gif"))
+                .with(new EnBinary(file, "my-picture.gif", EnvelopeTest.GIF))
                 .unwrap()
                 .writeTo(stream);
             MatcherAssert.assertThat(
                 stream.toString(StandardCharsets.UTF_8),
                 Matchers.allOf(
-                    Matchers.containsString("multipart/mixed"),
+                    Matchers.containsString(EnvelopeTest.MIXED),
                     Matchers.not(
-                        Matchers.containsString("multipart/alternative")
+                        Matchers.containsString(EnvelopeTest.ALT)
                     ),
                     Matchers.containsString("filename=my-picture.gif")
+                )
+            );
+        } finally {
+            Files.delete(file.toPath());
+        }
+    }
+
+    /**
+     * Envelope.Mime groups both bodies into one nested alternative part and
+     * keeps the attachment as its sibling inside the mixed container.
+     *
+     * @throws Exception If fails
+     */
+    @Test
+    void nestsBodiesWithAttachmentAsSibling() throws Exception {
+        final File file = File.createTempFile(
+            EnvelopeTest.PREFIX, EnvelopeTest.SUFFIX_GIF
+        );
+        try {
+            Files.write(file.toPath(), new byte[] {1, 2, 3});
+            final MimeMultipart mixed = (MimeMultipart) new Envelope.Mime()
+                .with(new EnPlain(EnvelopeTest.PLAIN))
+                .with(new EnHtml(EnvelopeTest.HTML))
+                .with(new EnBinary(file, EnvelopeTest.PIC, EnvelopeTest.GIF))
+                .unwrap().getContent();
+            MatcherAssert.assertThat(
+                Arrays.asList(
+                    mixed.getContentType(),
+                    MimeMultipart.class.cast(
+                        mixed.getBodyPart(0).getContent()
+                    ).getContentType(),
+                    mixed.getBodyPart(1).getFileName()
+                ),
+                Matchers.contains(
+                    Matchers.startsWith(EnvelopeTest.MIXED),
+                    Matchers.startsWith(EnvelopeTest.ALT),
+                    Matchers.equalTo(EnvelopeTest.PIC)
+                )
+            );
+        } finally {
+            Files.delete(file.toPath());
+        }
+    }
+
+    /**
+     * Envelope.Mime preserves both the plain and the HTML body payloads
+     * inside the nested alternative part.
+     *
+     * @throws Exception If fails
+     */
+    @Test
+    void preservesBothBodiesInsideAlternative() throws Exception {
+        final File file = File.createTempFile(
+            EnvelopeTest.PREFIX, EnvelopeTest.SUFFIX_GIF
+        );
+        try {
+            Files.write(file.toPath(), new byte[] {1, 2, 3});
+            final MimeMultipart mixed = (MimeMultipart) new Envelope.Mime()
+                .with(new EnPlain(EnvelopeTest.PLAIN))
+                .with(new EnHtml(EnvelopeTest.HTML))
+                .with(new EnBinary(file, EnvelopeTest.PIC, EnvelopeTest.GIF))
+                .unwrap().getContent();
+            final MimeMultipart alt = (MimeMultipart) mixed
+                .getBodyPart(0).getContent();
+            MatcherAssert.assertThat(
+                Arrays.asList(
+                    mixed.getContentType(),
+                    alt.getContentType(),
+                    (String) alt.getBodyPart(0).getContent(),
+                    (String) alt.getBodyPart(1).getContent()
+                ),
+                Matchers.contains(
+                    Matchers.startsWith(EnvelopeTest.MIXED),
+                    Matchers.startsWith(EnvelopeTest.ALT),
+                    Matchers.containsString(EnvelopeTest.PLAIN),
+                    Matchers.containsString(EnvelopeTest.HTML)
+                )
+            );
+        } finally {
+            Files.delete(file.toPath());
+        }
+    }
+
+    /**
+     * Envelope.Mime keeps a text attachment outside the alternative group,
+     * as a distinct attachment part that preserves its payload.
+     *
+     * @throws Exception If fails
+     */
+    @Test
+    void keepsTextAttachmentOutsideAlternative() throws Exception {
+        final File file = File.createTempFile(
+            EnvelopeTest.PREFIX, ".txt"
+        );
+        try {
+            Files.write(
+                file.toPath(),
+                EnvelopeTest.TEXT.getBytes(StandardCharsets.UTF_8)
+            );
+            final MimeMultipart mixed = (MimeMultipart) new Envelope.Mime()
+                .with(new EnPlain(EnvelopeTest.PLAIN))
+                .with(new EnHtml(EnvelopeTest.HTML))
+                .with(new EnBinary(file, EnvelopeTest.NOTES, "text/plain"))
+                .unwrap().getContent();
+            MatcherAssert.assertThat(
+                Arrays.asList(
+                    MimeMultipart.class.cast(
+                        mixed.getBodyPart(0).getContent()
+                    ).getContentType(),
+                    mixed.getBodyPart(1).getFileName(),
+                    mixed.getBodyPart(1).getDisposition(),
+                    new String(
+                        mixed.getBodyPart(1).getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8
+                    )
+                ),
+                Matchers.contains(
+                    Matchers.startsWith(EnvelopeTest.ALT),
+                    Matchers.equalTo(EnvelopeTest.NOTES),
+                    Matchers.equalToIgnoringCase(Part.ATTACHMENT),
+                    Matchers.containsString(EnvelopeTest.TEXT)
                 )
             );
         } finally {
